@@ -1,0 +1,27 @@
+{
+  "name": "inkjet-emu",
+  "version": "0.1.0",
+  "description": "Browser-side virtual PCL3 inkjet printer emulator with GhostPDL rendering.",
+  "license": "AGPL-3.0-only",
+  "author": "parkertomatoes <parkertomatoes@gmail.com>",
+  "type": "module",
+  "module": "./dist/inkjet-emu.js",
+  "exports": {
+    ".": {
+      "import": "./dist/inkjet-emu.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vite": "^8.0.0",
+    "vitest": "^4.0.0"
+  }
+}
