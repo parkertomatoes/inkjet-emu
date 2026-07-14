@@ -4,7 +4,6 @@ import { PclPageDetector } from "../src/pcl-page-detector.js";
 
 function makePrinter(options = {}) {
   return new InkjetEmulator({
-    autoFlushMs: 0,
     renderer: {
       toPdf: vi.fn(async bytes => bytes),
       toPng: vi.fn(async bytes => bytes),
@@ -36,6 +35,18 @@ describe("InkjetEmulator", () => {
     expect(printer.pageById.get(id).data).toEqual(new Uint8Array([0x41, 0x42]));
   });
 
+  it("emits busy, ACK, and idle immediately after a strobe", () => {
+    const printer = makePrinter();
+    const statuses = [];
+
+    printer.on_input_status(status => statuses.push(status));
+
+    writeByte(printer, 0x41);
+
+    expect(statuses).toEqual([0x58, 0x98, 0xd8]);
+    expect(printer.get_input_status()).toBe(0xd8);
+  });
+
   it("queues pages and emits receive events when PCL page end is detected", () => {
     const printer = makePrinter();
     const received = [];
@@ -48,6 +59,17 @@ describe("InkjetEmulator", () => {
 
     expect(printer.get_pages()).toHaveLength(1);
     expect(received).toEqual(printer.get_pages());
+  });
+
+  it("drops command-only buffers that end with a form feed", () => {
+    const printer = makePrinter();
+
+    for(const byte of [0x1b, 0x45, 0x0c]) {
+      writeByte(printer, byte);
+    }
+
+    expect(printer.get_pages()).toEqual([]);
+    expect(printer.buffer).toEqual([]);
   });
 
   it("ignores form feed bytes inside PCL binary payloads", () => {

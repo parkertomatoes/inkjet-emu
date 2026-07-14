@@ -19,11 +19,8 @@ emulator.add_listener("parallel0-control-output", value => {
   printer.send_output_control(value);
 });
 
-printer.on_input_data(value => {
-  emulator.bus.send("parallel0-data-input", value);
-});
-printer.on_input_control(value => {
-  emulator.bus.send("parallel0-control-input", value);
+printer.on_input_status(value => {
+  emulator.bus.send("parallel0-status-input", value);
 });
 
 printer.on_receive_page(async id => {
@@ -37,8 +34,14 @@ printer.on_receive_page(async id => {
 ```js
 const printer = new InkjetEmulator(options);
 
+// Host/LPT adapter -> printer.
 printer.send_output_data(0x41);
 printer.send_output_control(0x01);
+
+// Printer -> host/LPT adapter status register.
+printer.get_input_status();
+printer.on_input_status(value => {});
+
 printer.on_receive_page(id => {});
 
 const ids = printer.get_pages();
@@ -47,10 +50,13 @@ const png = await printer.to_png(ids[0], { width: 2550, height: 3300 });
 printer.remove_pages(ids);
 ```
 
-The parallel-port capture logic follows the previous v86 prototype behavior:
-data writes latch one byte and a rising edge on control bit 0 writes that byte
-to the print stream. Page detection defaults to PCL page-end detection with
-binary raster payload skipping.
+The parallel-port capture logic follows the LPT device direction:
+`send_output_data` and `send_output_control` are host writes to the printer.
+`on_input_status` is the printer driving the host-visible status register; in a
+v86 bridge, send those values to `parallel0-status-input`. Each strobe emits
+busy (`0x58`), ACK asserted (`0x98`), and idle (`0xd8`) immediately by default.
+Page detection defaults to PCL page-end detection with binary raster payload
+skipping.
 
 ## Assets
 

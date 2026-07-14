@@ -1,7 +1,5 @@
-import { concatUint8Arrays } from "./bytes.js";
 import { EventEmitter } from "./events.js";
 import { GhostPdlRenderer } from "./ghostpdl-renderer.js";
-import { randomId } from "./ids.js";
 import { PclPageDetector } from "./pcl-page-detector.js";
 
 /**
@@ -14,11 +12,12 @@ import { PclPageDetector } from "./pcl-page-detector.js";
 
 /**
  * @typedef {object} InkjetEmulatorOptions
- * @property {number} [autoFlushMs=1500] flush partial jobs after inactivity. Use 0 to disable.
- * @property {boolean} [flushOnPclPageEnd=true] flush when the PCL page detector sees a page end.
- * @property {boolean} [flushOnFormFeed=false] additionally flush on raw form-feed bytes.
  * @property {GhostPdlRenderer} [renderer] renderer used by to_pdf and to_png.
  */
+
+const PARALLEL_STATUS_IDLE = 0xd8;
+const PARALLEL_STATUS_BUSY = PARALLEL_STATUS_IDLE & ~0x80;
+const PARALLEL_STATUS_ACK = PARALLEL_STATUS_IDLE & ~0x40;
 
 /**
  * Virtual PCL inkjet printer attached through generic parallel-port events.
@@ -30,18 +29,14 @@ export class InkjetEmulator {
   constructor(options = {}) {
     this.outputData = 0;
     this.outputControl = 0;
+    this.inputStatus = PARALLEL_STATUS_IDLE;
     this.buffer = [];
     this.pages = [];
     this.pageById = new Map();
-    this.autoFlushMs = options.autoFlushMs ?? 1500;
-    this.flushOnPclPageEnd = options.flushOnPclPageEnd !== false;
-    this.flushOnFormFeed = options.flushOnFormFeed === true;
-    this.pclPageDetector = this.flushOnPclPageEnd ? new PclPageDetector() : null;
-    this.flushTimer = undefined;
+    this.pclPageDetector = new PclPageDetector();
     this.renderer = options.renderer || new GhostPdlRenderer();
     this.receivePageEvent = new EventEmitter();
-    this.inputDataEvent = new EventEmitter();
-    this.inputControlEvent = new EventEmitter();
+    this.inputStatusEvent = new EventEmitter();
   }
 
   /**
@@ -64,25 +59,29 @@ export class InkjetEmulator {
 
     if((this.outputControl & 1) && !(previousControl & 1)) {
       this.writeOutputByte(this.outputData);
+      this.acknowledgeStrobe();
     }
   }
 
   /**
-   * Stub for future bidirectional/PJL data reads.
+   * Register for status-register updates.
    * @param {(value: number) => void} handler
    * @returns {() => void} unsubscribe function
    */
-  on_input_data(handler) {
-    return this.inputDataEvent.on(handler);
+  on_input_status(handler) {
+    return this.inputStatusEvent.on(handler);
+  }
+
+  on_input_data(value) {
+
   }
 
   /**
-   * Stub for future bidirectional/PJL control reads.
-   * @param {(value: number) => void} handler
-   * @returns {() => void} unsubscribe function
+   * Read the current emulated parallel-port status byte.
+   * @returns {number}
    */
-  on_input_control(handler) {
-    return this.inputControlEvent.on(handler);
+  get_input_status() {
+    return this.inputStatus;
   }
 
   /**
@@ -126,7 +125,16 @@ export class InkjetEmulator {
    */
   async to_pdf(pages) {
     const data = this.getPageData(pages);
-    return this.renderer.toPdf(concatUint8Arrays(data));
+    const totalLength = data.reduce((sum, page) => sum + page.length, 0);
+    const pclBytes = new Uint8Array(totalLength);
+    let offset = 0;
+
+    for(const page of data) {
+      pclBytes.set(page, offset);
+      offset += page.length;
+    }
+
+    return this.renderer.toPdf(pclBytes);
   }
 
   /**
@@ -146,14 +154,17 @@ export class InkjetEmulator {
    * @returns {string | null} page ID when a page was queued.
    */
   flush(reason = "manual") {
-    this.clearFlushTimer();
-
     if(this.buffer.length === 0) {
       return null;
     }
 
+    if(isCommandOnlyBuffer(this.buffer)) {
+      this.buffer.length = 0;
+      return null;
+    }
+
     const page = {
-      id: randomId(),
+      id: crypto.randomUUID(),
       data: new Uint8Array(this.buffer),
       reason,
       createdAt: Date.now(),
@@ -171,30 +182,26 @@ export class InkjetEmulator {
     byte &= 0xff;
     this.buffer.push(byte);
 
-    if(this.pclPageDetector && this.pclPageDetector.push(byte)) {
+    if(this.pclPageDetector.push(byte)) {
       this.flush("pcl-page-end");
-      return;
-    }
-
-    if(this.flushOnFormFeed && byte === 0x0c) {
-      this.flush("form-feed");
-      return;
-    }
-
-    if(this.autoFlushMs > 0) {
-      this.clearFlushTimer();
-      this.flushTimer = setTimeout(() => {
-        this.flushTimer = undefined;
-        this.flush("timeout");
-      }, this.autoFlushMs);
     }
   }
 
-  clearFlushTimer() {
-    if(this.flushTimer !== undefined) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = undefined;
+  acknowledgeStrobe() {
+    this.setInputStatus(PARALLEL_STATUS_BUSY);
+    this.setInputStatus(PARALLEL_STATUS_ACK);
+    this.setInputStatus(PARALLEL_STATUS_IDLE);
+  }
+
+  setInputStatus(status) {
+    status &= 0xff;
+
+    if(this.inputStatus === status) {
+      return;
     }
+
+    this.inputStatus = status;
+    this.inputStatusEvent.emit(status);
   }
 
   getPageData(ids) {
@@ -212,4 +219,109 @@ export class InkjetEmulator {
       return page.data;
     });
   }
+}
+
+function isCommandOnlyBuffer(bytes) {
+  let index = 0;
+  let sawCommand = false;
+
+  while(index < bytes.length) {
+    const byte = bytes[index] & 0xff;
+
+    if(isIgnorableSeparator(byte)) {
+      index++;
+      continue;
+    }
+
+    if(byte === 0x1b) {
+      const nextIndex = skipEscapeSequence(bytes, index);
+
+      if(nextIndex === index) {
+        return false;
+      }
+
+      sawCommand = true;
+      index = nextIndex;
+      continue;
+    }
+
+    if(startsWithAscii(bytes, index, "@PJL")) {
+      sawCommand = true;
+      index = skipAsciiLine(bytes, index);
+      continue;
+    }
+
+    return false;
+  }
+
+  return sawCommand;
+}
+
+function isIgnorableSeparator(byte) {
+  return byte === 0x00 || byte === 0x09 || byte === 0x0a || byte === 0x0c || byte === 0x0d || byte === 0x20;
+}
+
+function skipEscapeSequence(bytes, start) {
+  let index = start + 1;
+  let command = "";
+
+  while(index < bytes.length) {
+    const byte = bytes[index] & 0xff;
+    command += String.fromCharCode(byte);
+    index++;
+
+    if(byte >= 0x40 && byte <= 0x7e) {
+      if(escapeSequenceHasPayload(command)) {
+        return start;
+      }
+
+      return index;
+    }
+  }
+
+  return start;
+}
+
+function escapeSequenceHasPayload(command) {
+  if(command.endsWith("V") && command.startsWith("*b")) {
+    return escapeSequencePayloadLength(command, "V") > 0;
+  }
+
+  if(command.endsWith("W")) {
+    return escapeSequencePayloadLength(command, "W") > 0;
+  }
+
+  return false;
+}
+
+function escapeSequencePayloadLength(command, terminator) {
+  const match = command.match(new RegExp(`([-+]?\\d+)${terminator}$`));
+  return match ? Number(match[1]) : 0;
+}
+
+function startsWithAscii(bytes, index, text) {
+  if(index + text.length > bytes.length) {
+    return false;
+  }
+
+  for(let offset = 0; offset < text.length; offset++) {
+    if((bytes[index + offset] & 0xff) !== text.charCodeAt(offset)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function skipAsciiLine(bytes, index) {
+  while(index < bytes.length) {
+    const byte = bytes[index] & 0xff;
+    index++;
+
+    if(byte === 0x0a || byte === 0x0c) {
+      break;
+    }
+  }
+
+  return index;
 }
