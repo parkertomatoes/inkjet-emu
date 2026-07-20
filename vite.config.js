@@ -2,18 +2,19 @@ import { defineConfig } from "vite";
 import { copyFileSync, mkdirSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-function copyGhostPdlAssets() {
+function copyGhostPclStreamAssets() {
   return {
-    name: "copy-ghostpdl-assets",
+    name: "copy-ghostpcl-stream-assets",
     closeBundle() {
       const files = [
-        ["src/vendor/gpcl6.wasm", "dist/assets/gpcl6.wasm"],
+        ["src/vendor/ghostpcl-stream/gpcl-stream.js", "dist/gpcl-stream.js"],
+        ["src/vendor/ghostpcl-stream/gpcl-stream.wasm", "dist/gpcl-stream.wasm"],
       ];
 
-      for(const fileName of readdirSync("src/vendor/fonts")) {
+      for(const fileName of readdirSync("src/vendor/ghostpcl-stream/fonts-dj500-min")) {
         files.push([
-          `src/vendor/fonts/${fileName}`,
-          `dist/assets/fonts/${fileName}`,
+          `src/vendor/ghostpcl-stream/fonts-dj500-min/${fileName}`,
+          `dist/fonts-dj500-min/${fileName}`,
         ]);
       }
 
@@ -29,7 +30,7 @@ function copyGhostPdlAssets() {
 
 export default defineConfig({
   plugins: [
-    copyGhostPdlAssets(),
+    copyGhostPclStreamAssets(),
   ],
   build: {
     lib: {

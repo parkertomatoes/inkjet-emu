@@ -1,327 +1,132 @@
-import { EventEmitter } from "./events.js";
-import { GhostPdlRenderer } from "./ghostpdl-renderer.js";
-import { PclPageDetector } from "./pcl-page-detector.js";
+import { GhostPclStream } from "./vendor/ghostpcl-stream/index.js";
 
 /**
- * @typedef {object} InkjetPage
- * @property {string} id
- * @property {Uint8Array} data
- * @property {string} reason
- * @property {number} createdAt
+ * Handler for when the printer drives the parallel port status lines
+ * @callback InkjetEmulatorReceiveStatusHandler
+ * @param {number} value - Value of the status register
+ * @returns {void}
  */
 
 /**
+ * Handler for when the printer ejects a page
+ * @callback InkjetEmulatorEjectPageHandler
+ * @param {Uint8Array} thumbnail PNG of the thumbnail of the page
+ * @returns {void}
+ */
+
+/**
+ * InkjetEmulator options.
+ *
  * @typedef {object} InkjetEmulatorOptions
- * @property {GhostPdlRenderer} [renderer] renderer used by to_pdf and to_png.
+ * @property {number} thumbnail_ppi Resolution (pixels per inch) to use for PNG thumbnails.
+ * @property {InkjetEmulatorReceiveStatusHandler} on_receive_status Handler for when the printer drives the parallel port status lines.
+ * @property {InkjetEmulatorEjectPageHandler} on_page_eject Handler for when the printer ejects a page.
  */
 
 const PARALLEL_STATUS_IDLE = 0xd8;
 const PARALLEL_STATUS_BUSY = PARALLEL_STATUS_IDLE & ~0x80;
 const PARALLEL_STATUS_ACK = PARALLEL_STATUS_IDLE & ~0x40;
 
+const CONTROL_LINES_MASK = 0x1f;
+const CONTROL_STROBE_MASK = 0x01;
+
 /**
- * Virtual PCL inkjet printer attached through generic parallel-port events.
+ * @class InkjetEmulator
+ * @classdesc Virtual PCL 3 compatible printer device.
  */
 export class InkjetEmulator {
-  /**
-   * @param {InkjetEmulatorOptions} [options]
-   */
-  constructor(options = {}) {
-    this.outputData = 0;
-    this.outputControl = 0;
-    this.inputStatus = PARALLEL_STATUS_IDLE;
-    this.buffer = [];
-    this.pages = [];
-    this.pageById = new Map();
-    this.pclPageDetector = new PclPageDetector();
-    this.renderer = options.renderer || new GhostPdlRenderer();
-    this.receivePageEvent = new EventEmitter();
-    this.inputStatusEvent = new EventEmitter();
-  }
+  /** 
+   * Initialize the printer - immediately latches idle parallel port status.
+   * @param {InkjetEmulatorOptions} options Printer options.
+   **/
+  constructor(options) {
+    validateOptions(options);
 
-  /**
-   * Latch one output byte from the host side of the parallel port.
-   * @param {number} value
-   */
-  send_output_data(value) {
-    this.outputData = value & 0xff;
-  }
+    /* options */
+    this.thumbnailPpi = options?.thumbnail_ppi ?? 16;
+    this.onReceiveStatus = options.on_receive_status;
+    this.onPageEject = options.on_page_eject;
 
-  /**
-   * Latch one control byte from the host. A rising edge on bit 0 strobes the
-   * current data byte into the print stream.
-   * @param {number} value
-   */
-  send_output_control(value) {
-    const previousControl = this.outputControl;
+    /* parallel port state */
+    this.ppData = 0;
+    this.ppControl = 0;
+    this.ppStatus = PARALLEL_STATUS_IDLE;
+    this.onReceiveStatus(this.ppStatus);
 
-    this.outputControl = value & 0x1f;
-
-    if((this.outputControl & 1) && !(previousControl & 1)) {
-      this.writeOutputByte(this.outputData);
-      this.acknowledgeStrobe();
-    }
-  }
-
-  /**
-   * Register for status-register updates.
-   * @param {(value: number) => void} handler
-   * @returns {() => void} unsubscribe function
-   */
-  on_input_status(handler) {
-    return this.inputStatusEvent.on(handler);
-  }
-
-  on_input_data(value) {
-
-  }
-
-  /**
-   * Read the current emulated parallel-port status byte.
-   * @returns {number}
-   */
-  get_input_status() {
-    return this.inputStatus;
-  }
-
-  /**
-   * Register a page-received event handler.
-   * @param {(id: string) => void} handler
-   * @returns {() => void} unsubscribe function
-   */
-  on_receive_page(handler) {
-    return this.receivePageEvent.on(handler);
-  }
-
-  /**
-   * Retrieve IDs of pages in the order printed.
-   * @returns {string[]}
-   */
-  get_pages() {
-    return this.pages.map(page => page.id);
-  }
-
-  /**
-   * Remove pages from the queue. Unknown page IDs are ignored.
-   * @param {string[]} pages
-   */
-  remove_pages(pages) {
-    const remove = new Set(pages);
-
-    this.pages = this.pages.filter(page => {
-      if(remove.has(page.id)) {
-        this.pageById.delete(page.id);
-        return false;
-      }
-
-      return true;
+    /* print job state */
+    const stream = new GhostPclStream({
+      on_page_eject: this.onPageEject,
+      thumbnail_ppi: this.thumbnailPpi,
     });
+    const streamStart = stream.start();
+    this.getPrintStream = async () => {
+      await streamStart;
+      return stream;
+    }
   }
 
   /**
-   * Render one or more queued pages as a single multi-page PDF.
-   * @param {string[]} pages
-   * @returns {Promise<Uint8Array>}
+   * Latch data on the parallel port data lines
+   * @param {number} value data register value
    */
-  async to_pdf(pages) {
-    const data = this.getPageData(pages);
-    const totalLength = data.reduce((sum, page) => sum + page.length, 0);
-    const pclBytes = new Uint8Array(totalLength);
-    let offset = 0;
-
-    for(const page of data) {
-      pclBytes.set(page, offset);
-      offset += page.length;
-    }
-
-    return this.renderer.toPdf(pclBytes);
+  send_data(value) {
+    this.ppData = value & 0xFF;
   }
 
   /**
-   * Preview a single queued page as a PNG image.
-   * @param {string} page
-   * @param {{ width?: number, height?: number }} [options]
-   * @returns {Promise<Uint8Array>}
+   * Drive the parallel port control lines
+   * @param {number} value control register value
    */
-  async to_png(page, options = {}) {
-    const data = this.getPageData([page]);
-    return this.renderer.toPng(data[0], options);
+  send_control(value) {
+    const strobe_prev = this.ppControl & CONTROL_STROBE_MASK;
+    const strobe_next = value & CONTROL_STROBE_MASK;
+
+    this.ppControl = value & CONTROL_LINES_MASK;
+
+    const strobe_raised = !strobe_prev && strobe_next;
+    const strobe_data = this.ppData;
+    if(strobe_raised) {
+      // Process byte and acknowledge PC
+      this.setInputStatus(PARALLEL_STATUS_BUSY);
+      this.getPrintStream().then(stream => stream.push(strobe_data));
+      this.setInputStatus(PARALLEL_STATUS_ACK);
+      this.setInputStatus(PARALLEL_STATUS_IDLE);
+    }
   }
 
   /**
-   * Flush the current print stream into the page queue.
-   * @param {string} [reason]
-   * @returns {string | null} page ID when a page was queued.
+   * Flush print queue and generate PDF of its contents.
+   *
+   * @returns {Promise<Uint8Array>} PDF bytes generated by GhostPCL.
    */
-  flush(reason = "manual") {
-    if(this.buffer.length === 0) {
-      return null;
-    }
-
-    if(isCommandOnlyBuffer(this.buffer)) {
-      this.buffer.length = 0;
-      return null;
-    }
-
-    const page = {
-      id: crypto.randomUUID(),
-      data: new Uint8Array(this.buffer),
-      reason,
-      createdAt: Date.now(),
-    };
-
-    this.buffer.length = 0;
-    this.pages.push(page);
-    this.pageById.set(page.id, page);
-    this.receivePageEvent.emit(page.id);
-
-    return page.id;
+  async collect_pdf() {
+    const stream = await this.getPrintStream();
+    return await stream.stop();
   }
 
-  writeOutputByte(byte) {
-    byte &= 0xff;
-    this.buffer.push(byte);
-
-    if(this.pclPageDetector.push(byte)) {
-      this.flush("pcl-page-end");
-    }
-  }
-
-  acknowledgeStrobe() {
-    this.setInputStatus(PARALLEL_STATUS_BUSY);
-    this.setInputStatus(PARALLEL_STATUS_ACK);
-    this.setInputStatus(PARALLEL_STATUS_IDLE);
-  }
-
+  /**
+   * @private
+   * @param {number} status
+   * @returns {void}
+   */
   setInputStatus(status) {
-    status &= 0xff;
-
-    if(this.inputStatus === status) {
-      return;
-    }
-
-    this.inputStatus = status;
-    this.inputStatusEvent.emit(status);
-  }
-
-  getPageData(ids) {
-    if(!Array.isArray(ids)) {
-      throw new TypeError("pages must be an array of page IDs");
-    }
-
-    return ids.map(id => {
-      const page = this.pageById.get(id);
-
-      if(!page) {
-        throw new Error(`Unknown page ID: ${id}`);
-      }
-
-      return page.data;
-    });
+    this.ppStatus = status & 0xFF;
+    this.onReceiveStatus(this.ppStatus);
   }
 }
 
-function isCommandOnlyBuffer(bytes) {
-  let index = 0;
-  let sawCommand = false;
-
-  while(index < bytes.length) {
-    const byte = bytes[index] & 0xff;
-
-    if(isIgnorableSeparator(byte)) {
-      index++;
-      continue;
-    }
-
-    if(byte === 0x1b) {
-      const nextIndex = skipEscapeSequence(bytes, index);
-
-      if(nextIndex === index) {
-        return false;
-      }
-
-      sawCommand = true;
-      index = nextIndex;
-      continue;
-    }
-
-    if(startsWithAscii(bytes, index, "@PJL")) {
-      sawCommand = true;
-      index = skipAsciiLine(bytes, index);
-      continue;
-    }
-
-    return false;
+function validateOptions(options) {
+  if(!options || typeof options !== "object") {
+    throw new TypeError("InkjetEmulator requires options");
   }
 
-  return sawCommand;
-}
-
-function isIgnorableSeparator(byte) {
-  return byte === 0x00 || byte === 0x09 || byte === 0x0a || byte === 0x0c || byte === 0x0d || byte === 0x20;
-}
-
-function skipEscapeSequence(bytes, start) {
-  let index = start + 1;
-  let command = "";
-
-  while(index < bytes.length) {
-    const byte = bytes[index] & 0xff;
-    command += String.fromCharCode(byte);
-    index++;
-
-    if(byte >= 0x40 && byte <= 0x7e) {
-      if(escapeSequenceHasPayload(command)) {
-        return start;
-      }
-
-      return index;
+  for(const name of ["on_receive_status", "on_page_eject"]) {
+    if(typeof options[name] !== "function") {
+      throw new TypeError(`InkjetEmulator option ${name} must be a function`);
     }
   }
 
-  return start;
-}
-
-function escapeSequenceHasPayload(command) {
-  if(command.endsWith("V") && command.startsWith("*b")) {
-    return escapeSequencePayloadLength(command, "V") > 0;
+  if(!Number.isFinite(options.thumbnail_ppi)) {
+    throw new TypeError("InkjetEmulator option thumbnail_ppi must be a finite number");
   }
-
-  if(command.endsWith("W")) {
-    return escapeSequencePayloadLength(command, "W") > 0;
-  }
-
-  return false;
-}
-
-function escapeSequencePayloadLength(command, terminator) {
-  const match = command.match(new RegExp(`([-+]?\\d+)${terminator}$`));
-  return match ? Number(match[1]) : 0;
-}
-
-function startsWithAscii(bytes, index, text) {
-  if(index + text.length > bytes.length) {
-    return false;
-  }
-
-  for(let offset = 0; offset < text.length; offset++) {
-    if((bytes[index + offset] & 0xff) !== text.charCodeAt(offset)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-function skipAsciiLine(bytes, index) {
-  while(index < bytes.length) {
-    const byte = bytes[index] & 0xff;
-    index++;
-
-    if(byte === 0x0a || byte === 0x0c) {
-      break;
-    }
-  }
-
-  return index;
 }

@@ -1,144 +1,191 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InkjetEmulator } from "../src/inkjet-emulator.js";
-import { PclPageDetector } from "../src/pcl-page-detector.js";
 
-function makePrinter(options = {}) {
-  return new InkjetEmulator({
-    renderer: {
-      toPdf: vi.fn(async bytes => bytes),
-      toPng: vi.fn(async bytes => bytes),
+const { FakeGhostPclStream } = vi.hoisted(() => {
+  class FakeGhostPclStream {
+    static instances = [];
+
+    constructor(options) {
+      this.options = options;
+      this.started = false;
+      this.stopped = false;
+      this.pushed = [];
+      FakeGhostPclStream.instances.push(this);
+    }
+
+    async start() {
+      this.started = true;
+    }
+
+    push(value) {
+      this.pushed.push(value);
+
+      if(value === 0x0c) {
+        this.options.on_page_eject(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+      }
+    }
+
+    async stop() {
+      this.stopped = true;
+      return new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+    }
+  }
+
+  return { FakeGhostPclStream };
+});
+
+vi.mock("../src/vendor/ghostpcl-stream/index.js", () => ({
+  GhostPclStream: FakeGhostPclStream,
+}));
+
+function makePrinter() {
+  const events = {
+    statuses: [],
+    thumbnails: [],
+  };
+
+  const printer = new InkjetEmulator({
+    on_receive_status(value) {
+      events.statuses.push(value);
     },
-    ...options,
+    on_page_eject(thumbnail) {
+      events.thumbnails.push(thumbnail);
+    },
+    thumbnail_ppi: 72,
   });
+
+  return { printer, events };
 }
 
 function writeByte(printer, byte) {
-  printer.send_output_data(byte);
-  printer.send_output_control(0x01);
-  printer.send_output_control(0x00);
+  printer.send_data(byte);
+  printer.send_control(0x01);
+  printer.send_control(0x00);
 }
 
-describe("InkjetEmulator", () => {
-  it("writes the latched data byte on a rising control bit 0 strobe", () => {
-    const printer = makePrinter();
+async function writeByteAndFlush(printer, byte) {
+  writeByte(printer, byte);
+  await flushAsyncWork();
+}
 
-    printer.send_output_data(0x41);
-    printer.send_output_control(0x00);
-    printer.send_output_control(0x01);
-    printer.send_output_data(0x42);
-    printer.send_output_control(0x01);
-    printer.send_output_control(0x00);
-    printer.send_output_control(0x01);
+async function writeBytes(printer, bytes) {
+  for(const byte of bytes) {
+    await writeByteAndFlush(printer, byte);
+  }
+}
 
-    const id = printer.flush();
+async function flushAsyncWork() {
+  for(let i = 0; i < 32; i++) {
+    await Promise.resolve();
+  }
+}
 
-    expect(printer.pageById.get(id).data).toEqual(new Uint8Array([0x41, 0x42]));
-  });
-
-  it("emits busy, ACK, and idle immediately after a strobe", () => {
-    const printer = makePrinter();
-    const statuses = [];
-
-    printer.on_input_status(status => statuses.push(status));
-
-    writeByte(printer, 0x41);
-
-    expect(statuses).toEqual([0x58, 0x98, 0xd8]);
-    expect(printer.get_input_status()).toBe(0xd8);
-  });
-
-  it("queues pages and emits receive events when PCL page end is detected", () => {
-    const printer = makePrinter();
-    const received = [];
-
-    printer.on_receive_page(id => received.push(id));
-
-    for(const byte of [0x1b, 0x45, 0x48, 0x69, 0x0c]) {
-      writeByte(printer, byte);
-    }
-
-    expect(printer.get_pages()).toHaveLength(1);
-    expect(received).toEqual(printer.get_pages());
-  });
-
-  it("drops command-only buffers that end with a form feed", () => {
-    const printer = makePrinter();
-
-    for(const byte of [0x1b, 0x45, 0x0c]) {
-      writeByte(printer, byte);
-    }
-
-    expect(printer.get_pages()).toEqual([]);
-    expect(printer.buffer).toEqual([]);
-  });
-
-  it("ignores form feed bytes inside PCL binary payloads", () => {
-    const printer = makePrinter();
-
-    for(const byte of [0x1b, 0x2a, 0x62, 0x33, 0x57, 0x0c, 0x0c, 0x0c]) {
-      writeByte(printer, byte);
-    }
-
-    expect(printer.get_pages()).toEqual([]);
-
-    writeByte(printer, 0x0c);
-
-    expect(printer.get_pages()).toHaveLength(1);
-  });
-
-  it("removes requested pages and keeps remaining order", () => {
-    const printer = makePrinter();
-    const ids = [];
-
-    writeByte(printer, 0x41);
-    ids.push(printer.flush("test"));
-    writeByte(printer, 0x42);
-    ids.push(printer.flush("test"));
-    writeByte(printer, 0x43);
-    ids.push(printer.flush("test"));
-
-    printer.remove_pages([ids[1], "missing"]);
-
-    expect(printer.get_pages()).toEqual([ids[0], ids[2]]);
-  });
-
-  it("renders selected pages as a concatenated PDF input", async () => {
-    const renderer = {
-      toPdf: vi.fn(async bytes => bytes),
-      toPng: vi.fn(async bytes => bytes),
-    };
-    const printer = makePrinter({ renderer });
-
-    writeByte(printer, 0x41);
-    const first = printer.flush("test");
-    writeByte(printer, 0x42);
-    const second = printer.flush("test");
-
-    await expect(printer.to_pdf([second, first])).resolves.toEqual(new Uint8Array([0x42, 0x41]));
-    expect(renderer.toPdf).toHaveBeenCalledWith(new Uint8Array([0x42, 0x41]));
-  });
-
-  it("renders a single selected page as PNG input", async () => {
-    const renderer = {
-      toPdf: vi.fn(async bytes => bytes),
-      toPng: vi.fn(async bytes => bytes),
-    };
-    const printer = makePrinter({ renderer });
-
-    writeByte(printer, 0x41);
-    const id = printer.flush("test");
-
-    await expect(printer.to_png(id, { width: 10, height: 20 })).resolves.toEqual(new Uint8Array([0x41]));
-    expect(renderer.toPng).toHaveBeenCalledWith(new Uint8Array([0x41]), { width: 10, height: 20 });
-  });
+afterEach(() => {
+  vi.unstubAllGlobals();
+  FakeGhostPclStream.instances = [];
 });
 
-describe("PclPageDetector", () => {
-  it("detects form feed outside binary transfer data", () => {
-    const detector = new PclPageDetector();
-    const bytes = [0x1b, 0x2a, 0x62, 0x32, 0x57, 0x0c, 0x0c, 0x0c];
-    const results = bytes.map(byte => detector.push(byte));
+describe("InkjetEmulator", () => {
+  it("requires the simplified callback options", () => {
+    expect(() => new InkjetEmulator()).toThrow(/requires options/);
+    expect(() => new InkjetEmulator({
+      on_receive_status() {},
+      on_page_eject() {},
+      thumbnail_ppi: Number.NaN,
+    })).toThrow(/thumbnail_ppi/);
+  });
 
-    expect(results).toEqual([false, false, false, false, false, false, false, true]);
+  it("writes the latched data byte on a rising control bit 0 strobe", async () => {
+    const { printer } = makePrinter();
+
+    printer.send_data(0x41);
+    printer.send_control(0x00);
+    printer.send_control(0x01);
+    await flushAsyncWork();
+    printer.send_data(0x42);
+    printer.send_control(0x01);
+    printer.send_control(0x00);
+    printer.send_control(0x01);
+    await flushAsyncWork();
+
+    expect(FakeGhostPclStream.instances[0].pushed).toEqual([0x41, 0x42]);
+  });
+
+  it("emits initial idle, busy, ACK, and idle status values", () => {
+    const { printer, events } = makePrinter();
+
+    writeByte(printer, 0x41);
+
+    expect(events.statuses).toEqual([0xd8, 0x58, 0x98, 0xd8]);
+  });
+
+  it("starts the GhostPCL stream on first byte", async () => {
+    const { printer } = makePrinter();
+
+    writeByte(printer, 0x1b);
+    await flushAsyncWork();
+
+    expect(FakeGhostPclStream.instances).toHaveLength(1);
+    expect(FakeGhostPclStream.instances[0].options).toMatchObject({
+      thumbnail_ppi: 72,
+    });
+    expect(FakeGhostPclStream.instances[0].started).toBe(true);
+    expect(FakeGhostPclStream.instances[0].pushed).toEqual([0x1b]);
+  });
+
+  it("forwards stream page eject output as page eject events", async () => {
+    const { printer, events } = makePrinter();
+
+    writeByte(printer, 0x0c);
+    await flushAsyncWork();
+
+    expect(events.thumbnails).toEqual([new Uint8Array([0x89, 0x50, 0x4e, 0x47])]);
+  });
+
+  it("keeps streaming across page reset bytes", async () => {
+    const { printer } = makePrinter();
+
+    await writeBytes(printer, [
+      0x1b, 0x2a, 0x62, 0x30, 0x30, 0x33, 0x57,
+      0x41, 0x0c, 0x42,
+      0x0c,
+      0x1b, 0x2a, 0x72, 0x62, 0x43,
+      0x00,
+      0x1b, 0x45,
+    ]);
+
+    expect(FakeGhostPclStream.instances).toHaveLength(1);
+    expect(FakeGhostPclStream.instances[0].pushed).toHaveLength(19);
+  });
+
+  it("streams form feed bytes inside raster data", async () => {
+    const { printer } = makePrinter();
+
+    await writeBytes(printer, [
+      0x1b, 0x2a, 0x62, 0x30, 0x30, 0x31, 0x57,
+      0x0c,
+      0x1b, 0x45,
+    ]);
+
+    expect(FakeGhostPclStream.instances).toHaveLength(1);
+    expect(FakeGhostPclStream.instances[0].pushed).toEqual([
+      0x1b, 0x2a, 0x62, 0x30, 0x30, 0x31, 0x57,
+      0x0c,
+      0x1b, 0x45,
+    ]);
+  });
+
+  it("stops the GhostPCL stream and returns the generated PDF", async () => {
+    const { printer } = makePrinter();
+
+    await writeByteAndFlush(printer, 0x1b);
+    await writeByteAndFlush(printer, 0x45);
+
+    const pdf = printer.collect_pdf();
+
+    await expect(pdf).resolves.toEqual(new Uint8Array([0x25, 0x50, 0x44, 0x46]));
+    expect(FakeGhostPclStream.instances).toHaveLength(1);
+    expect(FakeGhostPclStream.instances[0].pushed).toEqual([0x1b, 0x45]);
+    expect(FakeGhostPclStream.instances[0].stopped).toBe(true);
   });
 });
