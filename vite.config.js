@@ -23,6 +23,7 @@ function run(command, args) {
 function buildGhostPclStreamAssets() {
   return {
     name: "build-ghostpcl-stream-assets",
+    apply: "build",
     closeBundle() {
       console.info("[ghostpcl] Building stream WASM assets. This can take a while...");
       run("emcmake", [
@@ -60,6 +61,7 @@ export default defineConfig({
     buildGhostPclStreamAssets(),
   ],
   build: {
+    emptyOutDir: false,
     lib: {
       entry: "src/index.js",
       name: "InkjetEmu",

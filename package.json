@@ -21,6 +21,7 @@
   ],
   "scripts": {
     "build": "vite build",
+    "rebuild": "rm -rf build/ghostpcl-wasm dist && vite build",
     "build:ghostpcl-wasm": "emcmake cmake -S . -B build/ghostpcl-wasm -U GHOSTPDL_ROOT -U GHOSTPDL_BUILD -U WASM_OPT && cmake --build build/ghostpcl-wasm --target gpcl-stream-dist --parallel",
     "docs:api": "node scripts/generate-api-docs.mjs",
     "test": "vitest run"

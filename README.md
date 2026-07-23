@@ -40,27 +40,27 @@ emulator.add_listener("parallel0-control-output", value => {
 const pdfBytes = printer.collect_pdf();
 ```
 
-## Development
+## Building
 
-Use Node 22.
+Requires:
+  - Node 22+
+  - Emscripten, in particular emcmake must be in PATH
 
-The GhostPCL stream code from `harness-ghostpdl3` lives in
-`src/ghostpcl-stream.js`, with its wrapper source in `c/`. The GhostPDL
-PaintJet fork is included as the `ghostpcl`
-submodule. The root Vite build compiles the GhostPCL WASM
-wrapper and copies the required fonts from `ghostpcl/pcl/urwfonts` into
-`dist/`.
+Building:
+1. Initialize the git submodule. This is a one-time step and can be skipped in future builds
+    ```
+    git submodule update --init --recursive
+    ```
+2. To build (use "rebuild" to clean build artifacts first)
+    ```
+    npm run build
+    ```
 
-```sh
-git submodule update --init --recursive
-npm install
-npm run build
+## Testing
+
 ```
-
-The GhostPCL stream WASM build is driven by CMake through `emcmake`, which must
-be on `PATH`. CMake configures the `ghostpcl` submodule as a GhostPDL
-Emscripten build, builds its `libgpcl6` archive, and links the stream wrapper
-against that archive.
+npm run test
+```
 
 ## API
 
