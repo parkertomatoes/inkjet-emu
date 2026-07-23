@@ -1,4 +1,4 @@
-import { GhostPclStream } from "./vendor/ghostpcl-stream/index.js";
+import { GhostPclStream } from "./ghostpcl-stream.js";
 
 /**
  * Handler for when the printer drives the parallel port status lines

@@ -40,6 +40,28 @@ emulator.add_listener("parallel0-control-output", value => {
 const pdfBytes = printer.collect_pdf();
 ```
 
+## Development
+
+Use Node 22.
+
+The GhostPCL stream code from `harness-ghostpdl3` lives in
+`src/ghostpcl-stream.js`, with its wrapper source in `c/`. The GhostPDL
+PaintJet fork is included as the `ghostpcl`
+submodule. The root Vite build compiles the GhostPCL WASM
+wrapper and copies the required fonts from `ghostpcl/pcl/urwfonts` into
+`dist/`.
+
+```sh
+git submodule update --init --recursive
+npm install
+npm run build
+```
+
+The GhostPCL stream WASM build is driven by CMake through `emcmake`, which must
+be on `PATH`. CMake configures the `ghostpcl` submodule as a GhostPDL
+Emscripten build, builds its `libgpcl6` archive, and links the stream wrapper
+against that archive.
+
 ## API
 
 #### InkjetEmulatorOptions

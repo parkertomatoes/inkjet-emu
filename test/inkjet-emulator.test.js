@@ -34,7 +34,7 @@ const { FakeGhostPclStream } = vi.hoisted(() => {
   return { FakeGhostPclStream };
 });
 
-vi.mock("../src/vendor/ghostpcl-stream/index.js", () => ({
+vi.mock("../src/ghostpcl-stream.js", () => ({
   GhostPclStream: FakeGhostPclStream,
 }));
 
