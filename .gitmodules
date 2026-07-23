@@ -1,0 +1,3 @@
+[submodule "ghostpdl-paintjet"]
+	path = ghostpcl
+	url = https://github.com/parkertomatoes/ghostpdl-paintjet.git
