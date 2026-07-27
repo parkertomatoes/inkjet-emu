@@ -4,7 +4,7 @@ A JS library for printing from legacy PC emulators.
 
 Features include
   - Generic parallel port interface with no emulator dependency
-  - Supports the HP PCL 3 protocol, including color
+  - Supports the HP PCL 5e protocol, including color
   - Page eject events with PNG thumbnails
   - Prints multi-page PDFs
   - Reliable rendering using GhostPDL compiled to WASM
