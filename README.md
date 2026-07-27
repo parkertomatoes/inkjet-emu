@@ -9,6 +9,9 @@ Features include
   - Prints multi-page PDFs
   - Reliable rendering using GhostPDL compiled to WASM
 
+See it in action here (printing from DOS and Windows 3.1 from v86):
+https://inkjet-emu-demo.swannerfly42.workers.dev/
+
 ## Usage
 ```js
 import { InkjetEmulator } from "inkjet-emu";
